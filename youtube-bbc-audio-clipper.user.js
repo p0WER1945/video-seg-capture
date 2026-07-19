@@ -17,6 +17,14 @@
   'use strict';
 
   if (window !== window.top) return;
+  // 防止 SPA 重复注入
+  if (document.getElementById('aclip-bar')) return;
+
+  // YouTube 启用 Trusted Types，innerHTML 需要 policy
+  const tt = window.trustedTypes?.createPolicy('aclip', { createHTML: s => s });
+  const html = (s) => tt ? tt.createHTML(s) : s;
+
+  try {
 
   // ── 持久化设置 ──────────────────────────────────────
   const LS_VAULT  = 'aclip_vault';
@@ -184,7 +192,7 @@
   // ── 构建 DOM ────────────────────────────────────────
   const bar = document.createElement('div');
   bar.id = 'aclip-bar';
-  bar.innerHTML = `
+  bar.innerHTML = html(`
     <div id="aclip-settings">
       <div class="aclip-setting-row">
         <label>Vault 名称</label>
@@ -210,13 +218,13 @@
       <button id="aclip-mode" title="音频/视频 切换">🎵</button>
       <button id="aclip-gear" title="Obsidian 设置">⚙</button>
     </div>
-  `;
+  `);
   document.body.appendChild(bar);
 
   // 字幕弹窗
   const dialog = document.createElement('div');
   dialog.id = 'aclip-dialog';
-  dialog.innerHTML = `
+  dialog.innerHTML = html(`
     <div id="aclip-dialog-box">
       <textarea id="aclip-subtitle" placeholder="字幕 / 笔记（可选）…"></textarea>
       <div id="aclip-dialog-btns">
@@ -224,7 +232,7 @@
         <button id="aclip-dlg-confirm">确认保存</button>
       </div>
     </div>
-  `;
+  `);
   document.body.appendChild(dialog);
 
   const dotEl       = document.getElementById('aclip-dot');
@@ -543,4 +551,5 @@
 
   resetUI();
   log('🎵 Clipper v1.6 ready — [ 录制  ] 停止  Save → 字幕 → Obsidian');
+  } catch(e) { console.error('[Clipper] init error:', e); }
 })();
