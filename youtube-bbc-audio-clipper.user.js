@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Audio/Video Clipper for YouTube & BBC
 // @namespace    https://github.com/video-seg-capture
-// @version      1.2.0
-// @description  截取 YouTube / BBC 的音频或视频片段。1.1: shadow DOM + iframe 递归查找
+// @version      1.3.0
+// @description  按 [ 开始录制，按 ] 停止，显示视频时间，Save 按钮保存
 // @author       you
 // @match        https://www.youtube.com/*
 // @match        https://www.bbc.co.uk/*
@@ -16,53 +16,85 @@
 (function () {
   'use strict';
 
-  // 不在 iframe 里画 UI — 顶层窗口会通过 findVideoInFrames 递归进去找
   if (window !== window.top) return;
 
   // ── 状态 ────────────────────────────────────────────
   let recorder = null;
   let chunks = [];
-  let isRecording = false;
   let stream = null;
-  let mode = 'audio'; // 'audio' | 'video'
-  let fallbackStream = null; // getDisplayMedia 兜底流
+  let mode = 'audio';
+  let recordedVideo = null;   // 正在录制的 video 元素（读 currentTime 用）
+  let clipStart = 0;          // 视频时间：录制起点
+  let clipEnd = 0;            // 视频时间：录制终点
+  let hasClip = false;        // 是否已停止、待保存
 
-  // ── 日志（调试用，生产可删） ──────────────────────────
-  const DEBUG = true;
-  const log = (...args) => DEBUG && console.log('[Clipper]', ...args);
+  const log = (...args) => console.log('[Clipper]', ...args);
+
+  // ── 时间格式化 ──────────────────────────────────────
+  function fmt(sec) {
+    if (!isFinite(sec) || sec < 0) return '--:--';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
 
   // ── UI ─────────────────────────────────────────────
   const css = `
 #aclip-bar * { box-sizing:border-box; margin:0; padding:0; }
 #aclip-bar {
   position:fixed; bottom:20px; right:20px; z-index:99999;
-  display:flex; gap:8px; align-items:center;
-  padding:10px 14px;
+  display:flex; gap:10px; align-items:center;
+  padding:10px 16px;
   background:#1a1a2e; color:#eee;
   border-radius:10px; font:13px/1.4 system-ui,sans-serif;
   box-shadow:0 4px 24px rgba(0,0,0,.5);
   user-select:none;
 }
-#aclip-btn {
-  width:44px; height:44px; border-radius:50%; border:3px solid #e94560;
-  background:transparent; cursor:pointer;
-  display:flex; align-items:center; justify-content:center;
-  transition: all .15s;
-}
-#aclip-btn:hover { background:#e9456020; }
-#aclip-btn.recording { background:#e94560; border-color:#e94560; }
 #aclip-dot {
-  width:14px; height:14px; border-radius:50%;
-  background:#e94560; transition:all .15s;
+  width:12px; height:12px; border-radius:50%;
+  background:#555; flex-shrink:0; transition:background .2s;
 }
-#aclip-btn.recording #aclip-dot { border-radius:3px; width:10px; height:10px; }
-#aclip-timer { font-variant-numeric:tabular-nums; min-width:42px; text-align:center; font-size:14px; font-weight:600; }
-#aclip-mode { font-size:11px; color:#888; cursor:pointer; padding:2px 6px; border-radius:4px; border:1px solid #444; }
+#aclip-dot.rec { background:#e94560; animation:aclip-pulse .8s infinite; }
+#aclip-dot.done { background:#4ade80; }
+@keyframes aclip-pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+#aclip-times {
+  display:flex; gap:6px; align-items:center;
+  font-variant-numeric:tabular-nums; font-size:14px; font-weight:600;
+  min-width:110px;
+}
+#aclip-start { color:#aaa; }
+#aclip-sep { color:#555; }
+#aclip-end { color:#aaa; }
+#aclip-start.set { color:#e94560; }
+#aclip-end.set { color:#4ade80; }
+#aclip-save {
+  display:none;
+  padding:6px 14px;
+  background:#4ade80; color:#111; border:none;
+  border-radius:6px; font-weight:700; font-size:13px; cursor:pointer;
+  transition:filter .15s;
+}
+#aclip-save:hover { filter:brightness(1.1); }
+#aclip-save.show { display:block; }
+#aclip-mode {
+  font-size:11px; color:#888; cursor:pointer;
+  padding:2px 6px; border-radius:4px; border:1px solid #444;
+  background:transparent;
+}
 #aclip-mode:hover { color:#ccc; border-color:#666; }
 #aclip-mode.video { border-color:#e94560; color:#e94560; }
-#aclip-msg { position:fixed; bottom:80px; right:20px; z-index:100000;
+#aclip-msg {
+  position:fixed; bottom:80px; right:20px; z-index:100000;
   padding:8px 14px; border-radius:6px; font:13px system-ui;
   background:#333; color:#fff; opacity:0; transition:opacity .3s;
+  pointer-events:none;
+}
+#aclip-hint {
+  position:fixed; bottom:80px; right:20px; z-index:100000;
+  padding:6px 12px; border-radius:6px; font:12px system-ui;
+  background:#1a1a2e; color:#666; opacity:0; transition:opacity .4s;
   pointer-events:none;
 }
 `;
@@ -71,25 +103,41 @@
   style.textContent = css;
   document.head.appendChild(style);
 
+  // bar
   const bar = document.createElement('div');
   bar.id = 'aclip-bar';
   bar.innerHTML = `
-    <button id="aclip-btn" title="录制 / 停止"><div id="aclip-dot"></div></button>
-    <span id="aclip-timer">00:00</span>
-    <span id="aclip-mode" title="点击切换 音频/视频 模式">🎵</span>
+    <div id="aclip-dot"></div>
+    <span id="aclip-times">
+      <span id="aclip-start">--:--</span>
+      <span id="aclip-sep">/</span>
+      <span id="aclip-end">--:--</span>
+    </span>
+    <button id="aclip-save">Save</button>
+    <button id="aclip-mode" title="音频/视频 切换">🎵</button>
   `;
   document.body.appendChild(bar);
 
-  const btn = document.getElementById('aclip-btn');
-  const timerEl = document.getElementById('aclip-timer');
-  const modeEl = document.getElementById('aclip-mode');
-  let timerInterval = null;
-  let startTime = 0;
+  const dotEl    = document.getElementById('aclip-dot');
+  const startEl  = document.getElementById('aclip-start');
+  const endEl    = document.getElementById('aclip-end');
+  const saveBtn  = document.getElementById('aclip-save');
+  const modeBtn  = document.getElementById('aclip-mode');
 
+  // hint（快捷键提示）
+  const hint = document.createElement('div');
+  hint.id = 'aclip-hint';
+  hint.textContent = '[ 开始录制  |  ] 停止录制';
+  document.body.appendChild(hint);
+  // 鼠标悬浮 bar 时显示提示
+  bar.addEventListener('mouseenter', () => { hint.style.opacity = '1'; });
+  bar.addEventListener('mouseleave', () => { hint.style.opacity = '0'; });
+
+  // toast
   const msg = document.createElement('div');
   msg.id = 'aclip-msg';
   document.body.appendChild(msg);
-  const toast = (text, ms = 2500) => {
+  const toast = (text, ms = 2000) => {
     msg.textContent = text;
     msg.style.opacity = '1';
     clearTimeout(msg._t);
@@ -97,122 +145,77 @@
   };
 
   // ── 模式切换 ────────────────────────────────────────
-  modeEl.addEventListener('click', () => {
+  modeBtn.addEventListener('click', () => {
+    if (recorder && recorder.state === 'recording') { toast('⚠ 录制中不能切换模式'); return; }
     mode = mode === 'audio' ? 'video' : 'audio';
-    modeEl.textContent = mode === 'audio' ? '🎵' : '🎬';
-    modeEl.className = mode;
-    toast(mode === 'audio' ? '音频模式 — 只录声音' : '视频模式 — 录画面+声音');
+    modeBtn.textContent = mode === 'audio' ? '🎵' : '🎬';
+    modeBtn.className = mode;
+    toast(mode === 'audio' ? '音频模式' : '视频模式');
   });
 
+  // ── 重置 UI ─────────────────────────────────────────
+  function resetUI() {
+    dotEl.className = '';
+    startEl.textContent = '--:--';
+    startEl.className = '';
+    endEl.textContent = '--:--';
+    endEl.className = '';
+    saveBtn.classList.remove('show');
+    hasClip = false;
+    recordedVideo = null;
+  }
+
   // ═══════════════════════════════════════════════════════
-  //  核心：递归查找 <video> 元素
+  //  查找 video（shadow DOM + iframe 递归）
   // ═══════════════════════════════════════════════════════
 
-  // 在一个 root 内搜索，包括 shadow DOM
   function findVideosInRoot(root) {
     const videos = [];
-    // 1. 当前 root 的 video 元素
     root.querySelectorAll('video').forEach(v => videos.push(v));
-    // 2. 递归进入所有元素的 shadowRoot
-    const allElems = root.querySelectorAll('*');
-    for (const el of allElems) {
-      if (el.shadowRoot) {
-        videos.push(...findVideosInRoot(el.shadowRoot));
-      }
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) videos.push(...findVideosInRoot(el.shadowRoot));
     }
     return videos;
   }
 
-  // 递归搜索当前窗口 + 所有可访问的 (同源) iframe
-  function findVideoInFrames(win, depth = 0) {
-    if (depth > 5) return null; // 安全深度
-
+  function findVideoInFrames(win, depth) {
+    if (depth > 5) return null;
     const videos = findVideosInRoot(win.document);
     const live = videos.find(v => v.readyState >= 2 && v.duration > 0);
-    if (live) {
-      log(`找到 video: ${win.location.href} (depth=${depth})`, live);
-      return live;
-    }
-
-    // 递归进同源 iframe
-    const iframes = win.document.querySelectorAll('iframe');
-    for (const iframe of iframes) {
+    if (live) return live;
+    for (const iframe of win.document.querySelectorAll('iframe')) {
       try {
-        const idoc = iframe.contentDocument;
-        const iwin = iframe.contentWindow;
-        if (idoc && iwin) {
-          const v = findVideoInFrames(iwin, depth + 1);
-          if (v) return v;
-        }
-      } catch (_) {
-        // 跨域 iframe — 无法访问
-      }
+        const d = iframe.contentDocument;
+        if (d) { const v = findVideoInFrames(iframe.contentWindow, depth + 1); if (v) return v; }
+      } catch (_) { /* 跨域 */ }
     }
     return null;
-  }
-
-  // 诊断输出：列出所有 iframe（帮助了解页面结构）
-  function dumpIframes(win, depth = 0) {
-    const prefix = '  '.repeat(depth);
-    const iframes = win.document.querySelectorAll('iframe');
-    log(`${prefix}${win.location.href} — ${iframes.length} iframe(s)`);
-    for (const iframe of iframes) {
-      try {
-        const idoc = iframe.contentDocument;
-        if (idoc) {
-          dumpIframes(iframe.contentWindow, depth + 1);
-        } else {
-          log(`${prefix}  ⛔ 跨域 iframe: ${iframe.src}`);
-        }
-      } catch (_) {
-        log(`${prefix}  ⛔ 跨域 iframe: ${iframe.src}`);
-      }
-    }
   }
 
   function findVideo() {
-    const v = findVideoInFrames(window);
-    if (v) return v;
-    // 找不到，输出诊断
-    log('── 诊断：搜索范围内的 iframe 结构 ──');
-    dumpIframes(window);
-    log('── 诊断结束 ──');
-    return null;
+    return findVideoInFrames(window, 0);
   }
 
-  // ── 从 video 获取流 ─────────────────────────────────
+  // ── 流获取 ──────────────────────────────────────────
   function getStreamFromVideo(video) {
     if (mode === 'audio') {
       const s = video.captureStream();
-      const audioTrack = s.getAudioTracks()[0];
-      if (!audioTrack) {
-        toast('⚠ 没找到音轨（可能视频静音了）');
-        return null;
-      }
-      return new MediaStream([audioTrack]);
+      const at = s.getAudioTracks()[0];
+      if (!at) { toast('⚠ 没找到音轨'); return null; }
+      return new MediaStream([at]);
     }
     return video.captureStream();
   }
 
-  // ── 兜底：系统音频捕获 ──────────────────────────────
-  // ponytail: getDisplayMedia 每次弹系统对话框，体验一般；聊胜于无
   async function getFallbackStream() {
     try {
-      const s = await navigator.mediaDevices.getDisplayMedia({
-        audio: true,
-        video: true, // Chrome 要求 video 必须为 true
-      });
-      // 丢掉视频轨，只要音频
+      const s = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
       s.getVideoTracks().forEach(t => t.stop());
-      const audioTrack = s.getAudioTracks()[0];
-      if (!audioTrack) {
-        toast('⚠ 未选择音频共享');
-        return null;
-      }
-      return new MediaStream([audioTrack]);
+      const at = s.getAudioTracks()[0];
+      if (!at) { toast('⚠ 未选择音频共享'); return null; }
+      return new MediaStream([at]);
     } catch (e) {
-      if (e.name === 'AbortError') return null; // 用户取消
-      toast('⚠ 系统音频捕获失败: ' + e.message);
+      if (e.name !== 'AbortError') toast('⚠ 系统音频捕获失败: ' + e.message);
       return null;
     }
   }
@@ -222,17 +225,22 @@
   // ═══════════════════════════════════════════════════════
 
   async function startRecording() {
-    // 1. 尝试从 video 元素捕获
+    if (recorder && recorder.state === 'recording') return; // 已在录制
+
     const video = findVideo();
-    if (video) {
-      stream = getStreamFromVideo(video);
-      if (!stream) return;
-    } else {
-      // 2. 兜底：系统音频
-      toast('未找到 video 元素，使用系统音频捕获…');
+    if (!video) {
+      toast('未找到 video，尝试系统音频…');
       stream = await getFallbackStream();
       if (!stream) return;
+      recordedVideo = null;
+    } else {
+      stream = getStreamFromVideo(video);
+      if (!stream) return;
+      recordedVideo = video;
     }
+
+    // 记录视频当前时间
+    clipStart = recordedVideo ? recordedVideo.currentTime : 0;
 
     chunks = [];
     const mime = mode === 'video'
@@ -245,74 +253,81 @@
           ? 'audio/webm;codecs=opus'
           : 'audio/webm');
 
-    try {
-      recorder = new MediaRecorder(stream, { mimeType: mime });
-    } catch {
-      recorder = new MediaRecorder(stream);
-    }
+    try { recorder = new MediaRecorder(stream, { mimeType: mime }); }
+    catch { recorder = new MediaRecorder(stream); }
 
-    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
-    recorder.onstop = saveClip;
+    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = () => {
+      // 录制停止 → 显示 Save 按钮，不自动保存
+      dotEl.className = 'done';
+      startEl.className = 'set';
+      endEl.className = 'set';
+      endEl.textContent = fmt(clipEnd);
+      saveBtn.classList.add('show');
+      hasClip = true;
+      toast('✅ 已停止 — 点 Save 保存');
+    };
     recorder.start(100);
 
-    isRecording = true;
-    btn.classList.add('recording');
-    startTime = Date.now();
-    timerInterval = setInterval(updateTimer, 200);
-    updateTimer();
-    toast('🔴 录制中…再点一下停止');
+    // UI
+    dotEl.className = 'rec';
+    startEl.textContent = fmt(clipStart);
+    startEl.className = 'set';
+    endEl.textContent = '--:--';
+    endEl.className = '';
+    saveBtn.classList.remove('show');
+    hasClip = false;
+    toast('🔴 录制中…');
   }
 
   function stopRecording() {
     if (!recorder || recorder.state === 'inactive') return;
+
+    // 记录视频停止时间
+    clipEnd = recordedVideo ? recordedVideo.currentTime : 0;
+
     recorder.stop();
-    stream.getTracks().forEach((t) => t.stop());
+    stream.getTracks().forEach(t => t.stop());
     stream = null;
-
-    isRecording = false;
-    btn.classList.remove('recording');
-    clearInterval(timerInterval);
-  }
-
-  function updateTimer() {
-    const elapsed = Date.now() - startTime;
-    const s = Math.floor(elapsed / 1000);
-    const m = Math.floor(s / 60);
-    const ss = s % 60;
-    timerEl.textContent = `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
   }
 
   function saveClip() {
+    if (!hasClip || !chunks.length) return;
+
     const blob = new Blob(chunks, { type: recorder.mimeType });
-    // MediaRecorder 只出 WebM 容器，原生做不到 MP3/MP4
-    // .webm 兼容性好：VLC / Chrome / PotPlayer 都能直接播
-    const ext = '.webm';
-    const name = 'clip_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + ext;
+    const startStr = fmt(clipStart).replace(/:/g, '-');
+    const endStr   = fmt(clipEnd).replace(/:/g, '-');
+    const name = `clip_${startStr}_to_${endStr}.webm`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    a.click();
+    a.href = url; a.download = name; a.click();
     URL.revokeObjectURL(url);
-    const dur = ((Date.now() - startTime) / 1000).toFixed(1);
-    toast(`✅ 已保存 — ${dur}s`);
+    toast(`✅ 已保存 ${fmt(clipStart)} → ${fmt(clipEnd)}`);
+    resetUI();
   }
 
-  // ── 按钮 & 快捷键 ──────────────────────────────────
-  btn.addEventListener('click', () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
+  // ── Save 按钮 ────────────────────────────────────────
+  saveBtn.addEventListener('click', saveClip);
+
+  // ── 快捷键 [ ] ──────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    // 不拦截输入框
+    if (e.target.closest('input,textarea,[contenteditable]')) return;
+
+    if (e.key === '[') {
+      e.preventDefault();
+      if (recorder && recorder.state === 'recording') return; // 已在录
+      if (hasClip) { toast('⚠ 请先 Save 或等待当前片段保存'); return; }
       startRecording();
     }
-  });
 
-  document.addEventListener('keydown', (e) => {
-    if (e.code === 'KeyR' && e.ctrlKey && !e.target.closest('input,textarea,[contenteditable]')) {
+    if (e.key === ']') {
       e.preventDefault();
-      btn.click();
+      if (!recorder || recorder.state !== 'recording') return; // 没在录
+      stopRecording();
     }
   });
 
-  log('🎵 Audio/Video Clipper v1.1 ready — Ctrl+R 录制');
+  resetUI();
+  log('🎵 Clipper v1.3 ready — [ 开始  ] 停止  Save 保存');
 })();
