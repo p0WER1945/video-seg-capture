@@ -16,9 +16,12 @@
 ## 安装
 
 1. 为浏览器安装 [Tampermonkey](https://www.tampermonkey.net/)。
-2. 打开本仓库中的 [`youtube-bbc-audio-clipper.user.js`](youtube-bbc-audio-clipper.user.js)。
-3. 点击 **Raw** → Tampermonkey 会弹出安装提示。
-4. 打开 YouTube 或 BBC，播放视频，右下角即出现控制栏。
+2. 从 GitHub 安装脚本：[`youtube-bbc-audio-clipper.user.js`](https://raw.githubusercontent.com/p0WER1945/video-seg-capture/main/youtube-bbc-audio-clipper.user.js)
+   - 或打开本仓库中的文件，点击 **Raw** → Tampermonkey 会弹出安装提示。
+3. 打开 YouTube 或 BBC，播放视频，右下角即出现控制栏。
+
+> **自动更新：** 脚本已内置 `@updateURL` / `@downloadURL` 元数据，Tampermonkey 会自动检查新版本（约每天一次）。
+> 如果之前安装的是旧版本，请重新安装一次以启用更新通道。
 
 ## 使用方法
 

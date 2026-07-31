@@ -16,9 +16,13 @@ One-click capture audio or video clips from YouTube and BBC pages. Designed for 
 ## Installation
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser.
-2. Open [`youtube-bbc-audio-clipper.user.js`](youtube-bbc-audio-clipper.user.js) in this repo.
-3. Click **Raw** → Tampermonkey will prompt you to install the script.
-4. Navigate to YouTube or BBC, play a video, and the control bar appears in the bottom-right corner.
+2. Install the script from GitHub: [`youtube-bbc-audio-clipper.user.js`](https://raw.githubusercontent.com/p0WER1945/video-seg-capture/main/youtube-bbc-audio-clipper.user.js)
+   - or open the file in this repo and click **Raw** → Tampermonkey will prompt you to install.
+3. Navigate to YouTube or BBC, play a video, and the control bar appears in the bottom-right corner.
+
+> **Auto-update:** the script ships with `@updateURL`/`@downloadURL` metadata, so Tampermonkey
+> checks for new versions automatically (roughly once a day). If you installed an older
+> version before, reinstall once to pick up the update channel.
 
 ## Usage
 
